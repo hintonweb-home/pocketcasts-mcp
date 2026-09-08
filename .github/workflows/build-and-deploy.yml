@@ -1,0 +1,82 @@
+name: Build and Deploy
+
+# Builds the Docker image on every push to master, pushes it to GHCR tagged
+# with the full commit SHA, then bumps the image tag in the hintonweb-home/k8s-gitops
+# repo (apps/pocketcasts/) so the cluster picks up the new build.
+#
+# This repo is a FORK of alansmodic/pocketcasts-mcp. The trigger below is
+# deliberately just "push to master on this repo" — the default GitHub
+# Actions trigger scope already excludes upstream pushes and PRs from forks
+# of this fork; do not broaden this to pull_request or pull_request_target.
+#
+# Requires a repo secret named GITOPS_DEPLOY_KEY: a write-capable SSH deploy
+# key already added to hintonweb-home/k8s-gitops, with its private half stored
+# here. Created out-of-band — this workflow only references the secret by
+# name. NOTE: ai-ledger's build-and-deploy.yml references a secret of the
+# SAME NAME (GITOPS_DEPLOY_KEY) targeting the same k8s-gitops repo; in
+# practice the same key value needs to be added as a secret to BOTH source
+# repos.
+
+on:
+  push:
+    branches:
+      - master
+
+env:
+  IMAGE_NAME: ghcr.io/hintonweb-home/pocketcasts-mcp
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tagged with the full commit SHA (not shortened) for an
+          # unambiguous, reproducible reference in the GitOps repo.
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout k8s-gitops
+        uses: actions/checkout@v4
+        with:
+          repository: hintonweb-home/k8s-gitops
+          ssh-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
+          path: k8s-gitops
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/kustomize
+
+      - name: Bump image tag
+        working-directory: k8s-gitops/apps/pocketcasts
+        run: |
+          kustomize edit set image ${{ env.IMAGE_NAME }}=${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Commit and push
+        working-directory: k8s-gitops
+        run: |
+          git config user.name "pocketcasts-mcp-ci"
+          git config user.email "pocketcasts-mcp-ci@noreply.hintonweb.com"
+          git add apps/pocketcasts
+          git commit -m "deploy pocketcasts-mcp@${{ github.sha }}"
+          git push origin HEAD:master
