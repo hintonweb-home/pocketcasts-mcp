@@ -9,13 +9,9 @@ name: Build and Deploy
 # Actions trigger scope already excludes upstream pushes and PRs from forks
 # of this fork; do not broaden this to pull_request or pull_request_target.
 #
-# Requires a repo secret named GITOPS_DEPLOY_KEY: a write-capable SSH deploy
-# key already added to hintonweb-home/k8s-gitops, with its private half stored
-# here. Created out-of-band — this workflow only references the secret by
-# name. NOTE: ai-ledger's build-and-deploy.yml references a secret of the
-# SAME NAME (GITOPS_DEPLOY_KEY) targeting the same k8s-gitops repo; in
-# practice the same key value needs to be added as a secret to BOTH source
-# repos.
+# The gitops bump authenticates as the GitHub App hintonweb-gitops-bot (Contents write on
+# hintonweb-home/k8s-gitops only; org deploy keys are disabled). Org variable GITOPS_APP_ID and
+# org secret GITOPS_APP_PRIVATE_KEY are shared with this repo; each run mints a one-hour token.
 
 on:
   push:
@@ -55,17 +51,22 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Mint a k8s-gitops token
+        uses: actions/create-github-app-token@v2
+        id: gitops-token
+        with:
+          app-id: ${{ vars.GITOPS_APP_ID }}
+          private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          owner: hintonweb-home
+          repositories: k8s-gitops
+
       - name: Checkout k8s-gitops
         uses: actions/checkout@v4
         with:
           repository: hintonweb-home/k8s-gitops
-          ssh-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
+          ref: master
+          token: ${{ steps.gitops-token.outputs.token }}
           path: k8s-gitops
-
-      - name: Install kustomize
-        run: |
-          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
-          sudo mv kustomize /usr/local/bin/kustomize
 
       - name: Bump image tag
         working-directory: k8s-gitops/apps/pocketcasts
@@ -75,8 +76,10 @@ jobs:
       - name: Commit and push
         working-directory: k8s-gitops
         run: |
-          git config user.name "pocketcasts-mcp-ci"
-          git config user.email "pocketcasts-mcp-ci@noreply.hintonweb.com"
+          git config user.name "hintonweb-gitops-bot[bot]"
+          git config user.email "356625472+hintonweb-gitops-bot[bot]@users.noreply.github.com"
           git add apps/pocketcasts
+          git diff --cached --quiet && { echo "tag already current"; exit 0; }
           git commit -m "deploy pocketcasts-mcp@${{ github.sha }}"
-          git push origin HEAD:master
+          for i in 1 2 3; do git pull --rebase -q origin master && git push origin HEAD:master && exit 0; sleep 5; done
+          exit 1
